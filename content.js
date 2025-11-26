@@ -301,6 +301,26 @@ function observeTimeline() {
     observer.observe(timeline, { childList: true, subtree: true });
 }
 
+function rebuildQueueFromVisibleUsers() {
+    const els = getAllUsernameElements();
+    const usernames = [...new Set([...els].map(el => extractUsername(el)).filter(Boolean))];
+
+    usernames.forEach(u => {
+        if (userLocationCache.has(u)) {
+            // Already cached, just update DOM
+            applyCountryToDOM(u, userLocationCache.get(u).location);
+        } else if (!requestQueue.some(item => item.screenName === u)) {
+            // Not queued, enqueue regardless of seenUsers
+            enqueueUser(u);
+        }
+    });
+}
+
+// Run every 5 seconds
+setInterval(() => {
+    rebuildQueueFromVisibleUsers();
+}, 5000);
+
 // ======================
 // Logging Loop
 // ======================
