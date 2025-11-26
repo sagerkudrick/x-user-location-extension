@@ -27,66 +27,101 @@ function getCountryFromLocation(location) {
 // API + Queue + Caching
 // ======================
 const userLocationCache = new Map();
-const requestQueue = [];
+let requestQueue = [];
 const seenUsers = new Set();
+let isProcessingQueue = false;
+let savedQueue = []; // to restore after rate limit
 
-function fetchAccountLocation(screenName) {
-    if (userLocationCache.has(screenName)) {
-        console.log(`[CACHE HIT] ${screenName}`);
-        return Promise.resolve(userLocationCache.get(screenName));
+function enqueueUser(screenName) {
+    if (!seenUsers.has(screenName)) {
+        seenUsers.add(screenName);
+        requestQueue.push(screenName);
+        savedQueue.push(screenName); // keep a backup
     }
-
-    console.log(`[QUEUE] Adding ${screenName} to queue`);
-    return new Promise(resolve => {
-        requestQueue.push({ screenName, resolve });
-    });
+    processQueue();
 }
 
-// Process queue every 1.5 seconds
-setInterval(() => {
-    if (!requestQueue.length) return;
+async function processQueue() {
+    if (isProcessingQueue) return;
+    isProcessingQueue = true;
 
-    const { screenName, resolve } = requestQueue.shift();
-    console.log(`[QUEUE] Processing ${screenName}, queue size: ${requestQueue.length}`);
+    while (requestQueue.length > 0) {
+        const screenName = requestQueue.shift();
 
-    if (userLocationCache.has(screenName)) {
-        console.log(`[CACHE HIT in queue] ${screenName}`);
-        resolve(userLocationCache.get(screenName));
-        return;
+        // skip if cached
+        if (userLocationCache.has(screenName)) continue;
+
+        try {
+            const data = await fetchAboutInfo(screenName);
+            userLocationCache.set(screenName, data);
+            applyCountryToDOM(data.username, data.location);
+        } catch (err) {
+            console.error(`[QUEUE ERROR] ${screenName}:`, err);
+        }
+
+        // wait 2.5 seconds between requests
+        await delay(2500);
     }
 
-    try {
-        chrome.runtime.sendMessage(
-            { type: "get_about_info", screenName },
-            (response) => {
-                if (chrome.runtime.lastError) {
-                    console.error(`[MESSAGE ERROR] ${screenName}:`, chrome.runtime.lastError.message);
-                    resolve({ username: screenName, location: "Unknown" });
-                    return;
-                }
+    isProcessingQueue = false;
+}
 
-                let data;
-                if (response?.error) {
-                    console.error(`[API ERROR] ${screenName}:`, response.error);
-                    data = { username: screenName, location: "Unknown" };
-                } else {
-                    const result = response.data?.data?.user_result_by_screen_name?.result || null;
-                    const username = result?.core?.screen_name || screenName;
-                    const location = result?.about_profile?.account_based_in || "Unknown";
-                    data = { username, location };
-                    console.log(`[API SUCCESS] ${username}: ${location}`);
-                }
+async function fetchAboutInfo(screenName) {
+    const url = `https://x.com/${screenName}/about`;
 
-                userLocationCache.set(screenName, data);
-                applyCountryToDOM(data.username, data.location);
-                resolve(data);
+    while (true) {
+        try {
+            const response = await fetch(url, {
+                headers: {
+                    'Authorization': 'Bearer YOUR_BEARER_TOKEN_HERE',
+                    'x-csrf-token': getCt0Cookie(),
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            const text = await response.text();
+
+            // rate limit detected
+            if (text.includes("Rate limit exceeded")) {
+                console.warn(`[API] Rate limit hit! Pausing queue for 5 minutes...`);
+
+                // clear current queue
+                requestQueue = [];
+
+                // wait 5 minutes
+                await delay(5 * 60 * 1000);
+
+                // restore saved queue and retry
+                requestQueue = [...savedQueue];
+                continue;
             }
-        );
-    } catch (err) {
-        console.error(`[SEND MESSAGE EXCEPTION] ${screenName}:`, err);
-        resolve({ username: screenName, location: "Unknown" });
+
+            const json = JSON.parse(text);
+            const result = json.data?.data?.user_result_by_screen_name?.result || null;
+            const username = result?.core?.screen_name || screenName;
+            const location = result?.about_profile?.account_based_in || "Unknown";
+
+            console.log(`[API SUCCESS] ${username}: ${location}`);
+            return { username, location };
+
+        } catch (err) {
+            console.error(`[API ERROR] ${screenName}:`, err);
+            // wait a bit before retrying
+            await delay(5000);
+        }
     }
-}, 2500);
+}
+
+// Helper: get ct0 cookie
+function getCt0Cookie() {
+    const match = document.cookie.match(/ct0=([^;]+)/);
+    return match ? match[1] : '';
+}
+
+// Simple delay function
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // ======================
 // DOM Helpers
@@ -97,17 +132,13 @@ function getAllUsernameElements() {
 
 function applyCountryToDOM(username, location) {
     const userElements = document.querySelectorAll(`a[href='/${username}'] span span`);
-    if (!userElements.length) {
-        console.log(`[DOM] No elements found for ${username}`);
-        return;
-    }
+    if (!userElements.length) return;
 
     const countryText = getCountryFromLocation(location);
     userElements.forEach(el => {
         if (!el.dataset.countryApplied) {
             el.textContent = `${countryText} | ${username}`;
-            el.dataset.countryApplied = "true"; // prevent reapplying
-            console.log(`[DOM] Applied country text for ${username}: ${countryText}`);
+            el.dataset.countryApplied = "true";
         }
     });
 }
@@ -124,32 +155,23 @@ function updateVisibleUsers() {
         return match ? match[1] : null;
     }).filter(Boolean))];
 
-    console.log(`[UPDATE] Found usernames:`, usernames);
-
     usernames.forEach(u => {
         if (userLocationCache.has(u)) {
-            console.log(`[DOM] Updating cached ${u}`);
             applyCountryToDOM(u, userLocationCache.get(u).location);
-        } else if (!seenUsers.has(u)) {
-            seenUsers.add(u);
-            console.log(`[FETCH] Fetching location for ${u}`);
-            fetchAccountLocation(u);
+        } else {
+            enqueueUser(u);
         }
     });
 }
 
 function observeTimeline() {
     const timeline = document.querySelector("main");
-    if (!timeline) {
-        console.log(`[OBSERVE] Timeline not found, retrying...`);
-        return setTimeout(observeTimeline, 1000);
-    }
+    if (!timeline) return setTimeout(observeTimeline, 1000);
 
-    console.log(`[OBSERVE] Timeline found, observing mutations`);
     const observer = new MutationObserver(updateVisibleUsers);
     observer.observe(timeline, { childList: true, subtree: true });
 
-    updateVisibleUsers(); // initial pass
+    updateVisibleUsers();
 }
 
 observeTimeline();
