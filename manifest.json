@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "X About-API Fetcher",
+  "version": "1.0",
+  "permissions": ["cookies", "scripting"],
+  "host_permissions": ["https://x.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
