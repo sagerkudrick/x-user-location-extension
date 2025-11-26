@@ -33,20 +33,21 @@ const seenUsers = new Set();
 const userBackoffIndex = new Map();
 const userBackoffUntil = new Map();
 const backoffSequence = [
-    60000,   // 1 minute
-    120000,  // 2 minutes
-    300000,  // 5 minutes
-    600000,  // 10 minutes
-    900000   // 15 minutes (cap)
+    60000,   // 1 min
+    120000,  // 2 min
+    300000,  // 5 min
+    600000,  // 10 min
+    900000   // 15 min
 ];
 
-let isProcessing = false;
 let globalRateLimitUntil = 0;
-
-// NEW: Track when each user was added to queue
+const TEN_DAYS_MS = 10 * 24 * 60 * 60 * 1000;
+const QUEUE_STALE_THRESHOLD = 30000; // 30s
 const userQueueTimestamp = new Map();
-const QUEUE_STALE_THRESHOLD = 100000;  // 30 seconds
 
+// ======================
+// Helpers
+// ======================
 function isValidLocation(location) {
     if (!location) return false;
     const l = String(location).trim().toLowerCase();
@@ -55,209 +56,75 @@ function isValidLocation(location) {
     return true;
 }
 
-function fetchAccountLocation(screenName) {
-    if (userLocationCache.has(screenName)) {
-        console.log(`[CACHE HIT] ${screenName}`);
-        return Promise.resolve(userLocationCache.get(screenName));
-    }
+function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
 
-    // Check if already in queue - don't add duplicates
-    const alreadyQueued = requestQueue.some(item => item.screenName === screenName);
-    if (alreadyQueued) {
-        console.log(`[QUEUE] ${screenName} already queued, skipping`);
-        return Promise.resolve({ username: screenName, location: "Unknown" });
-    }
-
-    console.log(`[QUEUE] Adding ${screenName} to queue`);
-    userQueueTimestamp.set(screenName, Date.now());
-    return new Promise(resolve => requestQueue.push({ screenName, resolve }));
-}
-
-// NEW: Clean stale requests from queue
-function cleanStaleRequests() {
-    const now = Date.now();
-    const originalLength = requestQueue.length;
-    
-    // Remove requests older than threshold
-    for (let i = requestQueue.length - 1; i >= 0; i--) {
-        const item = requestQueue[i];
-        const queuedTime = userQueueTimestamp.get(item.screenName) || now;
-        
-        if (now - queuedTime > QUEUE_STALE_THRESHOLD) {
-            console.log(`[QUEUE CLEAN] Removing stale request: ${item.screenName} (${Math.round((now - queuedTime) / 1000)}s old)`);
-            item.resolve({ username: item.screenName, location: "Unknown" });
-            requestQueue.splice(i, 1);
-            userQueueTimestamp.delete(item.screenName);
-        }
-    }
-    
-    if (requestQueue.length < originalLength) {
-        console.log(`[QUEUE CLEAN] Removed ${originalLength - requestQueue.length} stale requests, ${requestQueue.length} remaining`);
-    }
-}
-
-// ======================
-// Queue Processor (FIXED with proper rate limit handling)
-// ======================
-async function processQueue() {
-    if (isProcessing) return;
-    if (!requestQueue.length) return;
-
-    // Clean stale requests first
-    cleanStaleRequests();
-    if (!requestQueue.length) return;
-
-    // Check global rate limit
-    const now = Date.now();
-    if (globalRateLimitUntil > now) {
-        const waitSeconds = Math.ceil((globalRateLimitUntil - now) / 1000);
-        console.warn(`[GLOBAL PAUSE] Waiting ${waitSeconds}s before processing queue`);
-        return;
-    }
-
-    isProcessing = true;
-
-    const { screenName, resolve } = requestQueue.shift();
-    userQueueTimestamp.delete(screenName);  // Remove from timestamp tracking
-    console.log(`[QUEUE] Processing ${screenName}, queue size: ${requestQueue.length}`);
-
-    // Check if this user is in backoff
-    const userBackoffTime = userBackoffUntil.get(screenName) || 0;
-    if (userBackoffTime > now) {
-        const waitSeconds = Math.ceil((userBackoffTime - now) / 1000);
-        console.warn(`[USER BACKOFF] ${screenName} in backoff for ${waitSeconds}s, re-queuing at end`);
-        requestQueue.push({ screenName, resolve });  // Re-queue at end
-        isProcessing = false;
-        return;
-    }
-
-    // Check cache again (might have been filled since enqueue)
-    if (userLocationCache.has(screenName)) {
-        resolve(userLocationCache.get(screenName));
-        isProcessing = false;
-        return;
-    }
-
-    try {
-        chrome.runtime.sendMessage({ type: "get_about_info", screenName }, (response) => {
-            if (chrome.runtime.lastError) {
-                console.error(`[MESSAGE ERROR] ${screenName}:`, chrome.runtime.lastError.message);
-                resolve({ username: screenName, location: "Unknown" });
-                isProcessing = false;
-                return;
-            }
-
-            console.log(`[RAW RESPONSE] ${screenName}:`, response);
-
-            // Detect rate limit
-            const rateLimitDetected =
-                (typeof response === "string" && response.includes("Rate limit exceeded")) ||
-                (response && typeof response.error === "string" && response.error.includes("Rate limit exceeded"));
-
-            if (rateLimitDetected) {
-                const idx = userBackoffIndex.get(screenName) || 0;
-                const wait = backoffSequence[Math.min(idx, backoffSequence.length - 1)];
-                
-                console.warn(`[RATE LIMIT] Hit for ${screenName}. Pausing ${Math.round(wait / 1000)}s (backoff idx ${idx})`);
-
-                // Set user-specific backoff
-                const backoffUntilTime = Date.now() + wait;
-                userBackoffUntil.set(screenName, backoffUntilTime);
-                
-                // Increment backoff index for next time
-                const nextIndex = Math.min(idx + 1, backoffSequence.length - 1);
-                userBackoffIndex.set(screenName, nextIndex);
-
-                // Set GLOBAL pause
-                globalRateLimitUntil = Math.max(globalRateLimitUntil, Date.now() + 30000);
-
-                // CLEAR THE ENTIRE QUEUE - no point processing old requests
-                const clearedCount = requestQueue.length;
-                requestQueue.forEach(item => {
-                    item.resolve({ username: item.screenName, location: "Unknown" });
-                    userQueueTimestamp.delete(item.screenName);
-                });
-                requestQueue.length = 0;
-                console.warn(`[RATE LIMIT] Cleared ${clearedCount} queued requests. Will rebuild from visible users after pause.`);
-                
-                // Re-queue only this user (the one that hit the limit)
-                requestQueue.unshift({ screenName, resolve });
-                userQueueTimestamp.set(screenName, Date.now());
-                
-                isProcessing = false;
-                return;
-            }
-
-            // Normal parsing path
-            try {
-                const result = response?.data?.data?.user_result_by_screen_name?.result || null;
-                const username = result?.core?.screen_name || screenName;
-                const location = result?.about_profile?.account_based_in || null;
-
-                const parsed = { username, location: location ?? "Unknown" };
-                console.log(`[API SUCCESS] ${username}: ${parsed.location}`);
-
-                // Only cache valid locations
-                if (isValidLocation(location)) {
-                    userLocationCache.set(username, { username, location });
-                    // Reset backoff on success
-                    userBackoffIndex.delete(username);
-                    userBackoffUntil.delete(username);
-                    applyCountryToDOM(username, location);
-                } else {
-                    console.log(`[CACHE SKIP] Not caching ${username} - invalid location`);
-                }
-
-                resolve(parsed);
-
-            } catch (parseErr) {
-                console.error(`[API PARSE ERROR] ${screenName}:`, parseErr);
-                resolve({ username: screenName, location: "Unknown" });
-            }
-
-            isProcessing = false;
-        });
-    } catch (err) {
-        console.error(`[SEND MESSAGE EXCEPTION] ${screenName}:`, err);
-        resolve({ username: screenName, location: "Unknown" });
-        isProcessing = false;
-    }
-}
-
-// Run queue processor every 500ms
-setInterval(processQueue, 7000);
-
-// Clean stale requests every 10 seconds
-setInterval(cleanStaleRequests, 10000);
-
-// Periodic logging
-setInterval(() => {
-    const now = Date.now();
-    
-    if (requestQueue.length > 0) {
-        console.log(`[QUEUE STATUS] ${requestQueue.length} requests pending`);
-    }
-    
-    const backoffUsers = [...userBackoffUntil.entries()]
-        .filter(([, time]) => time > now)
-        .map(([u, time]) => `${u}:${Math.ceil((time - now) / 1000)}s`);
-    
-    if (backoffUsers.length) {
-        console.warn(`[BACKOFF STATE] ${backoffUsers.join(", ")}`);
-    }
-
-    if (globalRateLimitUntil > now) {
-        console.warn(`[GLOBAL PAUSE] ${Math.ceil((globalRateLimitUntil - now) / 1000)}s remaining`);
-    }
-}, 10000); // every 10s
-
-// ======================
-// DOM Helpers
-// ======================
 function getAllUsernameElements() {
     return document.querySelectorAll("a[href^='/'] span span");
 }
 
+function extractUsername(el) {
+    const parent = el.closest("a[href^='/']");
+    if (!parent) return null;
+    const match = parent.getAttribute("href")?.match(/^\/([^\/]+)$/);
+    return match ? match[1] : null;
+}
+
+// ======================
+// Storage Helpers
+// ======================
+function getFromStorage(screenName) {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(["userLocationCache"], (result) => {
+            const storedCache = result.userLocationCache || {};
+            const now = Date.now();
+            let cacheUpdated = false;
+
+            // Purge old entries
+            for (const [user, data] of Object.entries(storedCache)) {
+                if (now - data.timestamp > TEN_DAYS_MS) {
+                    console.log(`[PURGE] Removing ${user} from storage (older than 10 days)`);
+                    delete storedCache[user];
+                    cacheUpdated = true;
+                }
+            }
+            if (cacheUpdated) chrome.storage.local.set({ userLocationCache: storedCache });
+
+            if (storedCache[screenName]) {
+                console.log(`[STORAGE HIT] ${screenName}`);
+                resolve(storedCache[screenName]);
+            } else {
+                resolve(null);
+            }
+        });
+    });
+}
+
+function saveToStorage(username, location) {
+    const obj = { username, location, timestamp: Date.now() };
+    chrome.storage.local.get(["userLocationCache"], (result) => {
+        const storedCache = result.userLocationCache || {};
+        storedCache[username] = obj;
+        chrome.storage.local.set({ userLocationCache: storedCache });
+        console.log(`[STORAGE SAVE] ${username}: ${location}`);
+    });
+}
+
+// ======================
+// Queue Helpers
+// ======================
+function enqueueUser(screenName) {
+    if (requestQueue.some(item => item.screenName === screenName)) {
+        console.log(`[QUEUE] ${screenName} already in queue`);
+        return;
+    }
+    requestQueue.push({ screenName });
+    userQueueTimestamp.set(screenName, Date.now());
+    console.log(`[QUEUE] Adding ${screenName} to queue`);
+}
+
+// ======================
+// DOM Helpers
+// ======================
 function applyCountryToDOM(username, location) {
     if (!isValidLocation(location)) return;
 
@@ -278,61 +145,182 @@ function applyCountryToDOM(username, location) {
 }
 
 // ======================
-// Timeline Observation
+// API Call Processor
 // ======================
-function updateVisibleUsers() {
-    // Don't queue new users during global rate limit
-    const now = Date.now();
-    if (globalRateLimitUntil > now) {
-        const waitSeconds = Math.ceil((globalRateLimitUntil - now) / 1000);
-        console.log(`[SKIP UPDATE] Still in global pause (${waitSeconds}s remaining), not queuing new users`);
-        return;
-    }
-
-    const els = getAllUsernameElements();
-    const usernames = [...new Set([...els].map(el => {
-        const parent = el.closest("a[href^='/']");
-        if (!parent) return null;
-        const match = parent.getAttribute("href")?.match(/^\/([^\/]+)$/);
-        return match ? match[1] : null;
-    }).filter(Boolean))];
-
-    usernames.forEach(u => {
-        if (userLocationCache.has(u)) {
-            applyCountryToDOM(u, userLocationCache.get(u).location);
-        } else if (!seenUsers.has(u)) {
-            seenUsers.add(u);
-            console.log(`[FETCH] Fetching location for ${u}`);
-            fetchAccountLocation(u);
+async function processApiCall(screenName) {
+    return new Promise((resolve) => {
+        if (globalRateLimitUntil > Date.now()) {
+            console.log(`[GLOBAL PAUSE] Skipping ${screenName}, still in pause`);
+            resolve({ username: screenName, location: "Unknown" });
+            return;
         }
+
+        chrome.runtime.sendMessage({ type: "get_about_info", screenName }, async (response) => {
+            if (chrome.runtime.lastError) {
+                console.error(`[MESSAGE ERROR] ${screenName}:`, chrome.runtime.lastError.message);
+                resolve({ username: screenName, location: "Unknown" });
+                return;
+            }
+
+            console.log(`[RAW RESPONSE] ${screenName}:`, response);
+
+            // Rate limit detection
+            const rateLimitDetected =
+                (typeof response === "string" && response.includes("Rate limit exceeded")) ||
+                (response && typeof response.error === "string" && response.error.includes("Rate limit exceeded"));
+
+            if (rateLimitDetected) {
+                const idx = userBackoffIndex.get(screenName) || 0;
+                const wait = backoffSequence[Math.min(idx, backoffSequence.length - 1)];
+
+                console.warn(`[RATE LIMIT] Hit for ${screenName}. Pausing ${Math.round(wait/1000)}s`);
+
+                userBackoffUntil.set(screenName, Date.now() + wait);
+                userBackoffIndex.set(screenName, Math.min(idx + 1, backoffSequence.length - 1));
+                globalRateLimitUntil = Math.max(globalRateLimitUntil, Date.now() + 30000);
+
+                // Clear queue except current user
+                const cleared = requestQueue.length;
+                requestQueue.length = 0;
+                console.warn(`[RATE LIMIT] Cleared ${cleared} queued requests`);
+
+                requestQueue.unshift({ screenName });
+                resolve({ username: screenName, location: "Unknown" });
+                return;
+            }
+
+            try {
+                const result = response?.data?.data?.user_result_by_screen_name?.result || null;
+                const username = result?.core?.screen_name || screenName;
+                const location = result?.about_profile?.account_based_in || "Unknown";
+
+                if (isValidLocation(location)) {
+                    userLocationCache.set(username, { username, location });
+                    saveToStorage(username, location);
+                    applyCountryToDOM(username, location);
+
+                    userBackoffIndex.delete(username);
+                    userBackoffUntil.delete(username);
+                    console.log(`[API SUCCESS] ${username}: ${location}`);
+                } else {
+                    console.log(`[CACHE SKIP] ${username} - invalid location`);
+                }
+
+                resolve({ username, location });
+            } catch (err) {
+                console.error(`[API PARSE ERROR] ${screenName}:`, err);
+                resolve({ username: screenName, location: "Unknown" });
+            }
+        });
     });
 }
 
-// Rebuild queue from visible users after rate limit ends
-setInterval(() => {
+// ======================
+// Queue Stale Cleaner
+// ======================
+function cleanStaleRequests() {
     const now = Date.now();
-    const wasInPause = globalRateLimitUntil > now;
-    
-    // Check if we just came out of a pause
-    if (!wasInPause && globalRateLimitUntil > 0 && globalRateLimitUntil <= now) {
-        console.log(`[RATE LIMIT ENDED] Rebuilding queue from visible users`);
-        globalRateLimitUntil = 0;  // Reset
-        updateVisibleUsers();  // Rebuild from current view
-    }
-}, 1000);  // Check every second
+    const originalLength = requestQueue.length;
 
-function observeTimeline() {
-    const timeline = document.querySelector("main");
-    if (!timeline) {
-        console.log(`[OBSERVE] Timeline not found, retrying...`);
-        return setTimeout(observeTimeline, 1000);
+    for (let i = requestQueue.length - 1; i >= 0; i--) {
+        const item = requestQueue[i];
+        const queuedTime = userQueueTimestamp.get(item.screenName) || now;
+        if (now - queuedTime > QUEUE_STALE_THRESHOLD) {
+            console.log(`[QUEUE CLEAN] Removing stale request: ${item.screenName}`);
+            requestQueue.splice(i, 1);
+            userQueueTimestamp.delete(item.screenName);
+        }
     }
 
-    console.log(`[OBSERVE] Timeline found, observing mutations`);
-    const observer = new MutationObserver(updateVisibleUsers);
-    observer.observe(timeline, { childList: true, subtree: true });
-
-    updateVisibleUsers();
+    if (requestQueue.length < originalLength) {
+        console.log(`[QUEUE CLEAN] Removed ${originalLength - requestQueue.length} stale requests`);
+    }
 }
 
+// ======================
+// Multi-loop Threads
+// ======================
+
+// 1️⃣ Storage Checker / Queue Adder
+async function storageCheckerLoop() {
+    while (true) {
+        const els = getAllUsernameElements();
+        const usernames = [...new Set([...els].map(el => extractUsername(el)).filter(Boolean))];
+
+        for (const u of usernames) {
+            if (userLocationCache.has(u)) {
+                applyCountryToDOM(u, userLocationCache.get(u).location);
+                continue;
+            }
+
+            const stored = await getFromStorage(u);
+            if (stored) {
+                userLocationCache.set(u, stored);
+                applyCountryToDOM(u, stored.location);
+                continue;
+            }
+
+            if (!seenUsers.has(u)) {
+                seenUsers.add(u);
+                enqueueUser(u);
+            }
+        }
+
+        await sleep(1000);
+    }
+}
+
+// 2️⃣ Queue Processor (API calls)
+async function queueProcessorLoop() {
+    while (true) {
+        cleanStaleRequests();
+
+        if (!requestQueue.length) {
+            await sleep(500);
+            continue;
+        }
+
+        const { screenName } = requestQueue.shift();
+        userQueueTimestamp.delete(screenName);
+        console.log(`[QUEUE] Processing ${screenName}, queue size: ${requestQueue.length}`);
+
+        await processApiCall(screenName);
+        await sleep(7000); // 7s enforced wait between API calls
+    }
+}
+
+// ======================
+// Timeline Observation
+// ======================
+function observeTimeline() {
+    const timeline = document.querySelector("main");
+    if (!timeline) return setTimeout(observeTimeline, 1000);
+
+    console.log(`[OBSERVE] Timeline found, observing mutations`);
+    const observer = new MutationObserver(() => {});
+    observer.observe(timeline, { childList: true, subtree: true });
+}
+
+// ======================
+// Logging Loop
+// ======================
+setInterval(() => {
+    console.log(`[QUEUE STATUS] ${requestQueue.length} requests pending`);
+
+    const now = Date.now();
+    const backoffUsers = [...userBackoffUntil.entries()]
+        .filter(([, t]) => t > now)
+        .map(([u, t]) => `${u}:${Math.ceil((t-now)/1000)}s`);
+    if (backoffUsers.length) console.warn(`[BACKOFF STATE] ${backoffUsers.join(", ")}`);
+
+    if (globalRateLimitUntil > now) {
+        console.warn(`[GLOBAL PAUSE] ${Math.ceil((globalRateLimitUntil - now)/1000)}s remaining`);
+    }
+}, 10000);
+
+// ======================
+// Start Loops
+// ======================
+storageCheckerLoop();
+queueProcessorLoop();
 observeTimeline();

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "X About-API Fetcher",
+  "name": "User Location Fetcher",
   "version": "1.0",
-  "permissions": ["cookies", "scripting"],
+  "permissions": ["cookies", "storage", "scripting", "activeTab"],
   "host_permissions": ["https://x.com/*"],
   "background": {
     "service_worker": "background.js"
