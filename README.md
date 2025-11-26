@@ -1,5 +1,7 @@
 # Chrome Flag — Country Badge Extension (WIP)
 
+⚠️  DO NOT USE AS-IS — May quickly rate-limit your account
+
 This is a small Chrome extension that displays a person's country next to their name on supported pages.
 
 Files in this repository
