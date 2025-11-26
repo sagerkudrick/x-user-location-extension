@@ -1,6 +1,3 @@
-// ======================
-// Country / Flag Helpers
-// ======================
 const countryNameToCode = {
     "United States": "US",
     "Canada": "CA",
@@ -10,6 +7,7 @@ const countryNameToCode = {
     "United Kingdom": "GB",
     "France": "FR",
     "Germany": "DE",
+    // add more as needed
 };
 
 function countryCodeToFlagEmoji(countryCode) {
@@ -29,113 +27,109 @@ function getFlagFromLocation(location) {
     return location;
 }
 
-// ======================
-// API + Queue + Caching
-// ======================
-const userLocationCache = new Map();
-const requestQueue = [];
-let requestsInWindow = 0;
-
-const MAX_REQUESTS = 900;       // per window
-const WINDOW_MS = 2 * 60 * 1000; // 2 minutes
-
-setInterval(() => { 
-    requestsInWindow = 0; 
-    processQueue(); 
-}, WINDOW_MS);
-
-function fetchAccountLocation(screenName) {
-    if (userLocationCache.has(screenName)) {
-        // Already cached, just return
-        return Promise.resolve(userLocationCache.get(screenName));
-    }
-
-    return new Promise(resolve => {
-        requestQueue.push({ screenName, resolve });
-        processQueue();
-    });
-}
-
-function processQueue() {
-    while (requestQueue.length > 0 && requestsInWindow < MAX_REQUESTS) {
-        const { screenName, resolve } = requestQueue.shift();
-        requestsInWindow++;
-
-        chrome.runtime.sendMessage(
-            { type: "get_about_info", screenName },
-            (response) => {
-                let data;
-                if (response.error) {
-                    console.error("API Error:", response.error);
-                    data = { username: screenName, location: "Unknown" };
-                } else {
-                    const result = response.data?.data?.user_result_by_screen_name?.result || null;
-                    const username = result?.core?.screen_name || screenName;
-                    const location = result?.about_profile?.account_based_in || "Unknown";
-                    data = { username, location };
-                }
-
-                userLocationCache.set(screenName, data);
-                applyFlagToDOM(username, data.location);
-                resolve(data);
-            }
-        );
-    }
-}
-
-// ======================
-// DOM Helpers
-// ======================
-function getAllUsernameElements() {
-    return document.querySelectorAll("a[href*='/'] span span");
-}
-
-function applyFlagToDOM(username, location) {
-    const userElements = document.querySelectorAll(`a[href='/${username}'] span span`);
+function editUsernameDOM(username, location) {
+    const userElements = document.querySelectorAll("a[href='/" + username + "'] span span");
     userElements.forEach(el => {
-        const flag = getFlagFromLocation(location);
+        const flag = getFlagFromLocation(location); // or pass fetched location
         el.textContent = `${flag} | ${username}`;
     });
 }
 
-// ======================
-// Timeline Observation
-// ======================
-const seenUsers = new Set();
+function fetchAccountLocation(_screenName) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(
+            { type: "get_about_info", screenName: _screenName },
+            (response) => {
+                if (response.error) {
+                    console.error("API Error:", response.error);
+                    resolve({ username: _screenName, location: "Unknown" });
+                    return;
+                }
 
-function updateVisibleUsers() {
-    const els = getAllUsernameElements();
-    const usernames = [...new Set([...els].map(el => {
-        const parent = el.closest("a[href*='/']");
-        if (!parent) return null;
-        const href = parent.getAttribute("href");
-        if (!href) return null;
-        const match = href.match(/^\/([^\/]+)$/);
-        return match ? match[1] : null;
-    }).filter(Boolean))];
+                const result = response.data?.data?.user_result_by_screen_name?.result || null;
+                if (!result) {
+                    console.log("No user info found in API response for", _screenName);
+                    resolve({ username: _screenName, location: "Unknown" });
+                    return;
+                }
 
-    usernames.forEach(u => {
-        if (userLocationCache.has(u)) {
-            applyFlagToDOM(u, userLocationCache.get(u).location);
-        } else if (!seenUsers.has(u)) {
-            seenUsers.add(u);
-            fetchAccountLocation(u);
-        }
+                const username = result.core?.screen_name || _screenName;
+                const location = result.about_profile?.account_based_in || "Unknown";
+
+                // Update DOM immediately
+                editUsernameDOM(username, location);
+
+                resolve({ username, location });
+            }
+        );
     });
 }
 
+
+// Scrape timeline usernames
+function getUsernamesFromTimeline() {
+    const els = document.querySelectorAll("a[href*='/'] span span");
+    const users = [];
+
+    els.forEach(el => {
+        const parent = el.closest("a[href*='/']");
+        if (!parent) return;
+
+        const href = parent.getAttribute("href");
+        if (!href) return;
+
+        const match = href.match(/^\/([^\/]+)$/);
+        if (match) users.push(match[1]);
+    });
+
+    return [...new Set(users)];
+}
+
+// Observe timeline
 function observeTimeline() {
+    console.log("[content] Observing timeline...");
+
     const timeline = document.querySelector("main");
     if (!timeline) {
+        console.log("[content] Timeline not ready, retrying...");
         return setTimeout(observeTimeline, 1000);
     }
 
-    // Observe DOM mutations
-    const observer = new MutationObserver(updateVisibleUsers);
-    observer.observe(timeline, { childList: true, subtree: true });
+    console.log("[content] Timeline found.");
 
-    // Also run immediately for initial content
-    updateVisibleUsers();
+    const seen = new Set();
+
+    async function handle() {
+        const users = getUsernamesFromTimeline();
+        for (const u of users) {
+            if (!seen.has(u)) {
+                seen.add(u);
+                console.log("[content] New user detected:", u);
+
+                const loc = await fetchAccountLocation(u);
+                console.log("[content] Location for", u, "=", loc);
+            }
+        }
+    }
+
+    async function handle() {
+        const users = getUsernamesFromTimeline();
+        for (const u of users) {
+            if (!seen.has(u)) {
+                seen.add(u);
+                console.log("[content] New user detected:", u);
+
+                const { location } = await fetchAccountLocation(u);
+                console.log("[content] Location for", u, "=", location);
+            }
+        }
+    }
+
+
+    const obs = new MutationObserver(handle);
+    obs.observe(timeline, { childList: true, subtree: true });
+
+    console.log("[content] Timeline observer active");
 }
 
 observeTimeline();
