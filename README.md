@@ -1,6 +1,8 @@
 # Chrome Flag — Country Badge Extension (WIP)
 
-⚠️  DO NOT USE AS-IS - This project utilizes x.com's API that has strict API limits. Repeated calls (which are made as you scroll through twitter, to parse users locations) will quickly rate limit your account. 
+⚠️  DO NOT USE AS-IS - This project utilizes x.com's API that has strict API limits. Repeated calls (which are made as you scroll through twitter, to parse users locations) will quickly rate limit your account.  ⚠️
+
+
 
 This is a small Chrome extension that displays a person's country next to their name on supported pages.
 
