@@ -86,7 +86,7 @@ setInterval(() => {
         console.error(`[SEND MESSAGE EXCEPTION] ${screenName}:`, err);
         resolve({ username: screenName, location: "Unknown" });
     }
-}, 1500);
+}, 2500);
 
 // ======================
 // DOM Helpers
