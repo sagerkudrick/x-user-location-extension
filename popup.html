@@ -1,9 +1,12 @@
-<!-- popup.html -->
-<button id="reEnablePanel">Re-enable Cache Panel</button>
-<script>
-document.getElementById("reEnablePanel").addEventListener("click", () => {
-    chrome.storage.local.set({ cachePanelEnabled: true }, () => {
-        alert("Cache panel will appear again on the timeline!");
-    });
-});
-</script>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cache Panel Control</title>
+</head>
+<body>
+    <button id="reEnablePanel">Re-enable Cache Panel</button>
+    <!-- Only external JS is allowed -->
+    <script src="popup.js"></script>
+</body>
+</html>

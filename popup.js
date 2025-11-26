@@ -1,54 +1,72 @@
-// Read storage and memory caches
-function updatePopupStatus() {
-    chrome.storage.local.getBytesInUse(["userLocationCache"], (bytes) => {
-        document.getElementById("storage-status").textContent = `Storage: ${bytes} bytes`;
-    });
-
-    // Memory cache size
-    chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-        const tabId = tabs[0].id;
-        chrome.scripting.executeScript({
-            target: { tabId },
-            func: () => {
-                const memSize = window.userLocationCache ? window.userLocationCache.size : 0;
-                return memSize;
-            }
-        }, (results) => {
-            const memSize = results?.[0]?.result || 0;
-            document.getElementById("memory-status").textContent = `Memory: ${memSize} entries`;
+document.addEventListener("DOMContentLoaded", () => {
+    // Re-enable button
+    const reEnableBtn = document.getElementById("reEnablePanel");
+    if (reEnableBtn) {
+        reEnableBtn.addEventListener("click", () => {
+            chrome.storage.local.set({ cachePanelEnabled: true }, () => {
+                alert("Cache panel will appear again on the timeline!");
+            });
         });
-    });
+    }
 
-    // Queue and backoff
-    chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-        const tabId = tabs[0].id;
-        chrome.scripting.executeScript({
-            target: { tabId },
-            func: () => {
-                const queueLen = window.requestQueue?.length || 0;
-                const now = Date.now();
-                const backoffUsers = [...(window.userBackoffUntil?.entries()||[])].filter(([_, t])=> t>now)
-                                    .map(([u, t])=> `${u}:${Math.ceil((t-now)/1000)}s`);
-                return { queueLen, backoffUsers };
-            }
-        }, (results) => {
-            const { queueLen, backoffUsers } = results?.[0]?.result || {};
-            document.getElementById("queue-status").textContent = `Queue: ${queueLen || 0}`;
-            document.getElementById("backoff-status").textContent = `Backoff: ${backoffUsers?.join(", ") || "None"}`;
+    // Toggle panel button
+    const toggleBtn = document.getElementById("toggle-panel-btn");
+    if (toggleBtn) {
+        toggleBtn.addEventListener("click", () => {
+            chrome.storage.local.get(["cachePanelEnabled"], (result) => {
+                const newState = !result.cachePanelEnabled;
+                chrome.storage.local.set({ cachePanelEnabled: newState }, () => {
+                    alert(`Cache panel is now ${newState ? "enabled" : "hidden"}`);
+                });
+            });
         });
-    });
-}
+    }
 
-// Toggle the panel visibility on the page
-document.getElementById("toggle-panel-btn").addEventListener("click", () => {
-    chrome.storage.local.get(["cachePanelEnabled"], (result) => {
-        const newState = !result.cachePanelEnabled;
-        chrome.storage.local.set({ cachePanelEnabled: newState }, () => {
-            alert(`Cache panel is now ${newState ? "enabled" : "hidden"}`);
+    // Update stats function
+    function updatePopupStatus() {
+        // Storage
+        chrome.storage.local.getBytesInUse(["userLocationCache"], (bytes) => {
+            const el = document.getElementById("storage-status");
+            if (el) el.textContent = `Storage: ${bytes} bytes`;
         });
-    });
+
+        // Memory cache, queue, backoff (via scripting)
+        chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
+            if (!tabs[0]?.id) return;
+            const tabId = tabs[0].id;
+
+            // Memory
+            chrome.scripting.executeScript({
+                target: { tabId },
+                func: () => {
+                    return window.userLocationCache?.size || 0;
+                }
+            }, (results) => {
+                const memEl = document.getElementById("memory-status");
+                if (memEl) memEl.textContent = `Memory: ${results?.[0]?.result || 0} entries`;
+            });
+
+            // Queue and backoff
+            chrome.scripting.executeScript({
+                target: { tabId },
+                func: () => {
+                    const queueLen = window.requestQueue?.length || 0;
+                    const now = Date.now();
+                    const backoffUsers = [...(window.userBackoffUntil?.entries()||[])]
+                        .filter(([_, t]) => t > now)
+                        .map(([u, t]) => `${u}:${Math.ceil((t - now)/1000)}s`);
+                    return { queueLen, backoffUsers };
+                }
+            }, (results) => {
+                const res = results?.[0]?.result || {};
+                const queueEl = document.getElementById("queue-status");
+                const backoffEl = document.getElementById("backoff-status");
+                if (queueEl) queueEl.textContent = `Queue: ${res.queueLen || 0}`;
+                if (backoffEl) backoffEl.textContent = `Backoff: ${res.backoffUsers?.join(", ") || "None"}`;
+            });
+        });
+    }
+
+    updatePopupStatus();
+    setInterval(updatePopupStatus, 2000);
 });
-
-// Update stats every 2s
-updatePopupStatus();
-setInterval(updatePopupStatus, 2000);
