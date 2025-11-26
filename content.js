@@ -190,9 +190,11 @@ async function processApiCall(screenName) {
             }
 
             try {
-                const result = response?.data?.data?.user_result_by_screen_name?.result || null;
-                const username = result?.core?.screen_name || screenName;
-                const location = result?.about_profile?.account_based_in || "Unknown";
+                   const result = response.data?.data?.user_result_by_screen_name?.result || null;
+                    const username = result?.core?.screen_name || screenName;
+                    let locationRaw = result?.about_profile?.account_based_in;
+                    let location = typeof locationRaw === "string" ? locationRaw : "Unknown";
+                    console.log(`[DEBUG LOCATION] ${username}:`, result?.about_profile?.account_based_in);
 
                 if (isValidLocation(location)) {
                     userLocationCache.set(username, { username, location });
@@ -344,3 +346,113 @@ setInterval(() => {
 storageCheckerLoop();
 queueProcessorLoop();
 observeTimeline();
+
+// ======================
+// GUI Panel for Cache Status
+// ======================
+
+function injectCacheStatusPanel() {
+    isPanelEnabled().then(enabled => {
+        if (!enabled) return; // panel is disabled, do nothing
+        if (document.getElementById("cache-status-panel")) return; // already injected
+
+        const postBtn = document.querySelector("a[data-testid='SideNav_NewTweet_Button']");
+        if (!postBtn) return;
+
+        const panel = document.createElement("div");
+        panel.id = "cache-status-panel";
+        panel.style.cssText = `
+            margin-top:8px;
+            padding:6px 10px;
+            background-color: rgba(29,155,240,0.1);
+            border: 1px solid #1da1f2;
+            border-radius: 8px;
+            font-size: 12px;
+            color: #1da1f2;
+            z-index: 9999;
+        `;
+
+        panel.innerHTML = `
+            <div id="cache-status-storage">Storage: calculating...</div>
+            <div id="cache-status-memory">Memory: calculating...</div>
+            <div id="cache-status-queue">Queue: calculating...</div>
+            <div id="cache-status-backoff">Backoff: calculating...</div>
+            <button id="cache-status-toggle" style="
+                margin-top:4px;
+                font-size:11px;
+                padding:2px 6px;
+                background:#1da1f2;
+                color:#fff;
+                border:none;
+                border-radius:4px;
+                cursor:pointer;
+            ">Hide Panel</button>
+            <div style="margin-top:4px; font-size:10px; color:#555;">
+                Re-enable from the extension popup
+            </div>
+        `;
+
+        postBtn.parentElement.insertBefore(panel, postBtn.nextSibling);
+
+        // Toggle button click
+        panel.querySelector("#cache-status-toggle").addEventListener("click", () => {
+            panel.remove();
+            setPanelEnabled(false);
+            console.log("[CACHE PANEL] Hidden, use extension popup to re-enable");
+        });
+    });
+}
+
+// Check if the cache panel should be shown
+async function isPanelEnabled() {
+    return new Promise(resolve => {
+        chrome.storage.local.get({ cachePanelEnabled: true }, (res) => {
+            resolve(res.cachePanelEnabled);
+        });
+    });
+}
+
+// Set the panel enabled/disabled
+function setPanelEnabled(enabled) {
+    chrome.storage.local.set({ cachePanelEnabled: enabled });
+}
+
+
+function updateCacheStatusPanel() {
+    injectCacheStatusPanel();
+
+    const panel = document.getElementById("cache-status-panel");
+    if (!panel) return;
+
+    // Storage size
+    chrome.storage.local.getBytesInUse(["userLocationCache"], (bytes) => {
+        const storageEl = document.getElementById("cache-status-storage");
+        if (storageEl) storageEl.textContent = `Storage: ${bytes} bytes`;
+    });
+
+    // In-memory cache size
+    const memEl = document.getElementById("cache-status-memory");
+    if (memEl) {
+        const approxBytes = JSON.stringify([...userLocationCache.values()]).length;
+        memEl.textContent = `Memory: ${userLocationCache.size} entries (~${approxBytes} bytes)`;
+    }
+
+    // Queue size
+    const queueEl = document.getElementById("cache-status-queue");
+    if (queueEl) queueEl.textContent = `Queue: ${requestQueue.length} entries`;
+
+    // Backoff users
+    const now = Date.now();
+    const backoffEl = document.getElementById("cache-status-backoff");
+    const backoffUsers = [...userBackoffUntil.entries()]
+        .filter(([, t]) => t > now)
+        .map(([u, t]) => `${u}:${Math.ceil((t-now)/1000)}s`);
+    if (backoffEl) backoffEl.textContent = `Backoff: ${backoffUsers.join(", ") || "None"}`;
+}
+
+// Update panel every 3 seconds
+setInterval(updateCacheStatusPanel, 3000);
+
+
+// Update panel every 3 seconds
+setInterval(updateCacheStatusPanel, 3000);

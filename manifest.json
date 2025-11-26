@@ -1,9 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "User Location Fetcher",
+  "name": "X.com Cache Monitor",
   "version": "1.0",
-  "permissions": ["cookies", "storage", "scripting", "activeTab"],
-  "host_permissions": ["https://x.com/*"],
+  "permissions": ["storage", "cookies", "activeTab", "scripting"],
+
+  "host_permissions": [
+    "https://x.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+        "64": "icons/icon.png"
+    }
+  },
   "background": {
     "service_worker": "background.js"
   },
